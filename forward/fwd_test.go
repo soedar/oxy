@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/net/websocket"
 	. "gopkg.in/check.v1"
+	"bufio"
 	"io"
 )
 
@@ -308,6 +309,56 @@ func (s *FwdSuite) TestDetectsWebsocketRequest(c *C) {
 	resp, err := sendWebsocketRequest(serverAddr, "/ws", "echo", c)
 	c.Assert(err, IsNil)
 	c.Assert(resp, Equals, "ok")
+}
+
+func (s *FwdSuite) TestWebsocketUpgradeFailed(c *C) {
+	f, err := New()
+	c.Assert(err, IsNil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(400)
+	})
+	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		mux.ServeHTTP(w, req)
+	})
+	defer srv.Close()
+
+	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path // keep the original path
+		// Set new backend URL
+		req.URL = testutils.ParseURI(srv.URL)
+		req.URL.Path = path
+		websocketRequest := isWebsocketRequest(req)
+		c.Assert(websocketRequest, Equals, true)
+		f.ServeHTTP(w, req)
+	})
+	defer proxy.Close()
+
+	proxyAddr := proxy.Listener.Addr().String()
+	conn, err := net.DialTimeout("tcp", proxyAddr, dialTimeout)
+
+	c.Assert(err, IsNil)
+	defer conn.Close()
+
+	req, err := http.NewRequest(http.MethodGet, "ws://127.0.0.1/ws", nil)
+	req.Header.Add("upgrade", "websocket")
+	req.Header.Add("Connection", "upgrade")
+
+	c.Assert(err, IsNil)
+
+	//First request works with 400
+	req.Write(conn)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	c.Assert(resp.StatusCode, Equals, 400)
+
+	//Second failed because connection is closed
+	req.Write(conn)
+	br = bufio.NewReader(conn)
+	resp, err = http.ReadResponse(br, req)
+	c.Assert(resp, IsNil)
+
 }
 
 func (s *FwdSuite) TestForwardsWebsocketTraffic(c *C) {
