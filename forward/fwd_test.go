@@ -17,6 +17,7 @@ import (
 	. "gopkg.in/check.v1"
 	"bufio"
 	"io"
+	"io/ioutil"
 )
 
 func TestFwd(t *testing.T) { TestingT(t) }
@@ -464,4 +465,36 @@ func (s *FwdSuite) TestResponseFlusher(c *C) {
 		c.FailNow()
 	}
 	c.Assert(err, Equals, io.EOF)
+}
+
+func (s *FwdSuite) TestTrailer(c *C) {
+	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Add("Trailer", "Announced")
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8") // normal header
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "Some Body\n")
+
+		w.Header().Add(http.TrailerPrefix+"Announced", "value 1")
+		w.Header().Add(http.TrailerPrefix+"Unannounced", "value 2")
+
+	})
+
+	f, err := New()
+	c.Assert(err, IsNil)
+
+	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		req.URL = testutils.ParseURI(srv.URL)
+		f.ServeHTTP(w, req)
+	})
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL)
+	c.Assert(err, IsNil)
+
+	_, err = ioutil.ReadAll(resp.Body)
+	c.Assert(err, IsNil)
+
+	c.Assert(resp.Trailer["Announced"][0], Equals, "value 1")
+	c.Assert(resp.Trailer["Unannounced"][0], Equals, "value 2")
 }
