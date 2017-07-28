@@ -1,22 +1,18 @@
 package forward
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	gorillawebsocket "github.com/gorilla/websocket"
 	"github.com/vulcand/oxy/testutils"
 	"github.com/vulcand/oxy/utils"
-	"golang.org/x/net/websocket"
 	. "gopkg.in/check.v1"
 )
 
@@ -291,181 +287,6 @@ func (s *FwdSuite) TestChunkedResponseConversion(c *C) {
 	c.Assert(string(body), Equals, "testtest1test2")
 	c.Assert(re.StatusCode, Equals, http.StatusOK)
 	c.Assert(re.Header.Get("Content-Length"), Equals, fmt.Sprintf("%d", len("testtest1test2")))
-}
-
-func (s *FwdSuite) TestDetectsWebsocketRequestEcho(c *C) {
-	f, err := New()
-	c.Assert(err, IsNil)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {
-		msg := make([]byte, 4)
-		conn.Read(msg)
-		c.Log(msg)
-		conn.Write(msg)
-		conn.Close()
-	}))
-	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		mux.ServeHTTP(w, req)
-	})
-	defer srv.Close()
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		req.URL = testutils.ParseURI(srv.URL)
-		f.ServeHTTP(w, req)
-	})
-	serverAddr := proxy.Listener.Addr().String()
-	c.Log(serverAddr)
-	headers := http.Header{}
-	websocketURL := "ws://" + serverAddr + "/ws"
-	headers.Add("Origin", websocketURL)
-	conn, resp, err := gorillawebsocket.DefaultDialer.Dial(websocketURL, headers)
-	if err != nil {
-		c.Errorf("Error [%s] during Dial with response: %+v", err, resp)
-		return
-	}
-	conn.WriteMessage(gorillawebsocket.TextMessage, []byte("OK"))
-	c.Log(conn.ReadMessage())
-
-}
-
-func (s *FwdSuite) TestDetectsWebsocketRequest(c *C) {
-	mux := http.NewServeMux()
-	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {
-		conn.Write([]byte("ok"))
-		conn.Close()
-	}))
-	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		websocketRequest := isWebsocketRequest(req)
-		c.Assert(websocketRequest, Equals, true)
-		mux.ServeHTTP(w, req)
-	})
-	defer srv.Close()
-
-	serverAddr := srv.Listener.Addr().String()
-	resp, err := sendWebsocketRequest(serverAddr, "/ws", "echo", c)
-	c.Assert(err, IsNil)
-	c.Assert(resp, Equals, "ok")
-}
-
-func (s *FwdSuite) TestWebsocketUpgradeFailed(c *C) {
-	f, err := New()
-	c.Assert(err, IsNil)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, req *http.Request) {
-		w.WriteHeader(400)
-	})
-	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		mux.ServeHTTP(w, req)
-	})
-	defer srv.Close()
-
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-
-		if path == "/ws" {
-			// Set new backend URL
-			req.URL = testutils.ParseURI(srv.URL)
-			req.URL.Path = path
-			websocketRequest := isWebsocketRequest(req)
-			c.Assert(websocketRequest, Equals, true)
-			f.ServeHTTP(w, req)
-		} else {
-			w.WriteHeader(200)
-		}
-	})
-	defer proxy.Close()
-
-	proxyAddr := proxy.Listener.Addr().String()
-	conn, err := net.DialTimeout("tcp", proxyAddr, dialTimeout)
-
-	c.Assert(err, IsNil)
-	defer conn.Close()
-
-	req, err := http.NewRequest(http.MethodGet, "ws://127.0.0.1/ws", nil)
-	c.Assert(err, IsNil)
-
-	req.Header.Add("upgrade", "websocket")
-	req.Header.Add("Connection", "upgrade")
-
-	req.Write(conn)
-
-	//First request works with 400
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, req)
-
-	c.Assert(resp.StatusCode, Equals, 500)
-
-	req, err = http.NewRequest(http.MethodGet, "ws://127.0.0.1/ws2", nil)
-	req.Header.Add("upgrade", "websocket")
-	req.Header.Add("Connection", "upgrade")
-	req.Write(conn)
-
-	br = bufio.NewReader(conn)
-	resp, err = http.ReadResponse(br, req)
-	c.Assert(resp.StatusCode, Equals, 200)
-
-}
-
-func (s *FwdSuite) TestForwardsWebsocketTraffic(c *C) {
-	f, err := New()
-	c.Assert(err, IsNil)
-
-	mux := http.NewServeMux()
-	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {
-		conn.Write([]byte("ok"))
-		conn.Close()
-	}))
-	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		mux.ServeHTTP(w, req)
-	})
-	defer srv.Close()
-
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-		f.ServeHTTP(w, req)
-	})
-	defer proxy.Close()
-
-	proxyAddr := proxy.Listener.Addr().String()
-	resp, err := sendWebsocketRequest(proxyAddr, "/ws", "echo", c)
-	c.Assert(err, IsNil)
-	c.Assert(resp, Equals, "ok")
-}
-
-const dialTimeout = time.Second
-
-func sendWebsocketRequest(serverAddr, path, data string, c *C) (received string, err error) {
-	client, err := net.DialTimeout("tcp", serverAddr, dialTimeout)
-	if err != nil {
-		return "", err
-	}
-	config := newWebsocketConfig(serverAddr, path)
-	conn, err := websocket.NewClient(config, client)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	if _, err := conn.Write([]byte(data)); err != nil {
-		return "", err
-	}
-	var msg = make([]byte, 512)
-	var n int
-	n, err = conn.Read(msg)
-	if err != nil {
-		return "", err
-	}
-
-	received = string(msg[:n])
-	return received, nil
-}
-
-func newWebsocketConfig(serverAddr, path string) *websocket.Config {
-	config, _ := websocket.NewConfig(fmt.Sprintf("ws://%s%s", serverAddr, path), "http://"+serverAddr)
-	return config
 }
 
 func (s *FwdSuite) TestResponseFlusher(c *C) {
