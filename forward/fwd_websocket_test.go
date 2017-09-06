@@ -195,6 +195,52 @@ func (s *FwdSuite) TestWebsocketRequestWithQueryParams(c *C) {
 	c.Assert(resp, Equals, "ok")
 }
 
+func (s *FwdSuite) TestWebsocketRequestWithEncodedChar(c *C) {
+	f, err := New()
+	c.Assert(err, IsNil)
+
+	upgrader := gorillawebsocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		c.Assert(r.URL.Path, Equals, "/%3A%2F%2F")
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			err = conn.WriteMessage(mt, message)
+			if err != nil {
+				break
+			}
+		}
+	}))
+	defer srv.Close()
+
+	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path // keep the original path
+		// Set new backend URL
+		req.URL = testutils.ParseURI(srv.URL)
+		req.URL.Path = path
+		f.ServeHTTP(w, req)
+	})
+	defer proxy.Close()
+
+	proxyAddr := proxy.Listener.Addr().String()
+
+	resp, err := newWebsocketRequest(
+		withServer(proxyAddr),
+		withPath("/%3A%2F%2F"),
+		withData("ok"),
+	).send()
+
+	c.Assert(err, IsNil)
+	c.Assert(resp, Equals, "ok")
+}
+
 func (s *FwdSuite) TestDetectsWebsocketRequest(c *C) {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {

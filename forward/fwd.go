@@ -317,7 +317,11 @@ func (f *websocketForwarder) copyRequest(req *http.Request, u *url.URL) (outReq 
 	}
 
 	if requestURI, err := url.ParseRequestURI(outReq.RequestURI); err == nil {
-		outReq.URL.Path = requestURI.Path
+		if requestURI.RawPath != "" {
+			outReq.URL.Path = requestURI.RawPath
+		} else {
+			outReq.URL.Path = requestURI.Path
+		}
 		outReq.URL.RawQuery = requestURI.RawQuery
 	}
 
