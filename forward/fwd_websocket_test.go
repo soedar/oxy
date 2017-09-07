@@ -2,6 +2,7 @@ package forward
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -75,13 +76,7 @@ func (s *FwdSuite) TestWebsocketServerWithoutCheckOrigin(c *C) {
 	}))
 	defer srv.Close()
 
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-		f.ServeHTTP(w, req)
-	})
+	proxy := createProxyWithForwarder(f, srv.URL)
 	defer proxy.Close()
 
 	proxyAddr := proxy.Listener.Addr().String()
@@ -119,13 +114,7 @@ func (s *FwdSuite) TestWebsocketRequestWithOrigin(c *C) {
 	}))
 	defer srv.Close()
 
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-		f.ServeHTTP(w, req)
-	})
+	proxy := createProxyWithForwarder(f, srv.URL)
 	defer proxy.Close()
 
 	proxyAddr := proxy.Listener.Addr().String()
@@ -174,13 +163,7 @@ func (s *FwdSuite) TestWebsocketRequestWithQueryParams(c *C) {
 	}))
 	defer srv.Close()
 
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-		f.ServeHTTP(w, req)
-	})
+	proxy := createProxyWithForwarder(f, srv.URL)
 	defer proxy.Close()
 
 	proxyAddr := proxy.Listener.Addr().String()
@@ -220,13 +203,7 @@ func (s *FwdSuite) TestWebsocketRequestWithEncodedChar(c *C) {
 	}))
 	defer srv.Close()
 
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-		f.ServeHTTP(w, req)
-	})
+	proxy := createProxyWithForwarder(f, srv.URL)
 	defer proxy.Close()
 
 	proxyAddr := proxy.Listener.Addr().String()
@@ -339,14 +316,7 @@ func (s *FwdSuite) TestForwardsWebsocketTraffic(c *C) {
 	})
 	defer srv.Close()
 
-	proxy := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
-		path := req.URL.Path // keep the original path
-		// Set new backend URL
-		req.URL = testutils.ParseURI(srv.URL)
-		req.URL.Path = path
-
-		f.ServeHTTP(w, req)
-	})
+	proxy := createProxyWithForwarder(f, srv.URL)
 	defer proxy.Close()
 
 	proxyAddr := proxy.Listener.Addr().String()
@@ -354,6 +324,100 @@ func (s *FwdSuite) TestForwardsWebsocketTraffic(c *C) {
 		withServer(proxyAddr),
 		withPath("/ws"),
 		withData("echo"),
+	).send()
+
+	c.Assert(err, IsNil)
+	c.Assert(resp, Equals, "ok")
+}
+
+func createTLSWebsocketServer() *httptest.Server {
+	upgrader := gorillawebsocket.Upgrader{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			err = conn.WriteMessage(mt, message)
+			if err != nil {
+				break
+			}
+		}
+	}))
+	return srv
+}
+
+func createProxyWithForwarder(forwarder *Forwarder, URL string) *httptest.Server {
+	return testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path // keep the original path
+		// Set new backend URL
+		req.URL = testutils.ParseURI(URL)
+		req.URL.Path = path
+
+		forwarder.ServeHTTP(w, req)
+	})
+}
+
+func (s *FwdSuite) TestWebsocketTransferTLSConfig(c *C) {
+	srv := createTLSWebsocketServer()
+	defer srv.Close()
+
+	forwarderWithoutTLSConfig, err := New()
+	c.Assert(err, IsNil)
+
+	proxyWithoutTLSConfig := createProxyWithForwarder(forwarderWithoutTLSConfig, srv.URL)
+	defer proxyWithoutTLSConfig.Close()
+
+	proxyAddr := proxyWithoutTLSConfig.Listener.Addr().String()
+
+	_, err = newWebsocketRequest(
+		withServer(proxyAddr),
+		withPath("/ws"),
+		withData("ok"),
+	).send()
+
+	c.Assert(err, NotNil)
+	c.Assert(err, ErrorMatches, "bad status")
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	forwarderWithTLSConfig, err := New(RoundTripper(transport))
+	c.Assert(err, IsNil)
+
+	proxyWithTLSConfig := createProxyWithForwarder(forwarderWithTLSConfig, srv.URL)
+	defer proxyWithTLSConfig.Close()
+
+	proxyAddr = proxyWithTLSConfig.Listener.Addr().String()
+
+	resp, err := newWebsocketRequest(
+		withServer(proxyAddr),
+		withPath("/ws"),
+		withData("ok"),
+	).send()
+
+	c.Assert(err, IsNil)
+	c.Assert(resp, Equals, "ok")
+
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	forwarderWithTLSConfigFromDefaultTransport, err := New()
+	c.Assert(err, IsNil)
+
+	proxyWithTLSConfigFromDefaultTransport := createProxyWithForwarder(forwarderWithTLSConfigFromDefaultTransport, srv.URL)
+	defer proxyWithTLSConfig.Close()
+
+	proxyAddr = proxyWithTLSConfigFromDefaultTransport.Listener.Addr().String()
+
+	resp, err = newWebsocketRequest(
+		withServer(proxyAddr),
+		withPath("/ws"),
+		withData("ok"),
 	).send()
 
 	c.Assert(err, IsNil)

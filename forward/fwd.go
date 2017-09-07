@@ -128,6 +128,7 @@ func New(setters ...optSetter) (*Forwarder, error) {
 	if f.httpForwarder.roundTripper == nil {
 		f.httpForwarder.roundTripper = http.DefaultTransport
 	}
+	f.websocketForwarder.TLSClientConfig = f.httpForwarder.roundTripper.(*http.Transport).TLSClientConfig
 	if f.httpForwarder.rewriter == nil {
 		h, err := os.Hostname()
 		if err != nil {
