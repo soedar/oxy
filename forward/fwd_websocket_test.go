@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -290,7 +291,7 @@ func (s *FwdSuite) TestWebsocketUpgradeFailed(c *C) {
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, req)
 
-	c.Assert(resp.StatusCode, Equals, 500)
+	c.Assert(resp.StatusCode, Equals, 400)
 
 	req, err = http.NewRequest(http.MethodGet, "ws://127.0.0.1/ws2", nil)
 	req.Header.Add("upgrade", "websocket")
@@ -299,7 +300,7 @@ func (s *FwdSuite) TestWebsocketUpgradeFailed(c *C) {
 
 	br = bufio.NewReader(conn)
 	resp, err = http.ReadResponse(br, req)
-	c.Assert(resp.StatusCode, Equals, 200)
+	c.Assert(err, Equals, io.ErrUnexpectedEOF)
 }
 
 func (s *FwdSuite) TestForwardsWebsocketTraffic(c *C) {
