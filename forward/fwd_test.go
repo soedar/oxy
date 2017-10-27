@@ -380,3 +380,23 @@ func (s *FwdSuite) TestTrailer(c *C) {
 	c.Assert(resp.Trailer["Announced"][0], Equals, "value 1")
 	c.Assert(resp.Trailer["Unannounced"][0], Equals, "value 2")
 }
+
+func (s *FwdSuite) TestDirectServeHTTP(c *C) {
+	f, err := New()
+	c.Assert(err, IsNil)
+
+	called := false
+	srv := testutils.NewHandler(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		w.Write([]byte("hello"))
+	})
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	c.Assert(err, IsNil)
+
+	// Directly call the http handler with a created request
+	resp := httptest.NewRecorder()
+	f.ServeHTTP(resp, req)
+	c.Assert(called, Equals, true)
+}

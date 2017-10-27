@@ -238,10 +238,18 @@ func (f *httpForwarder) copyRequest(req *http.Request) (*http.Request, error) {
 	outReq.URL.Scheme = req.URL.Scheme
 	outReq.URL.Host = req.URL.Host
 
-	// RequestURI contains the originally requested path and query string. We have to copy this to the outgoing request
-	u, err := url.ParseRequestURI(req.RequestURI)
-	if err != nil {
-		return nil, err
+	// If the Request was created by Go via a real HTTP request,  RequestURI will
+	// contain the original query string. If the Request was created in code, RequestURI
+	// will be empty, and we will use the URL object instead
+	var u *url.URL
+	if req.RequestURI != "" {
+		var err error
+		u, err = url.ParseRequestURI(req.RequestURI)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		u = req.URL
 	}
 	outReq.URL.Path = u.Path
 	outReq.URL.RawPath = u.RawPath
