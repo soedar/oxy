@@ -199,7 +199,14 @@ func (f *httpForwarder) serveBufferedHTTP(w http.ResponseWriter, req *http.Reque
 	}
 
 	start := time.Now().UTC()
-	response, err := f.roundTripper.RoundTrip(f.copyRequest(req, req.URL))
+	outReq, err := f.copyRequest(req)
+	if err != nil {
+		f.log.Errorf("vulcand/oxy/forward/httpbuffer: Error copying Request URI %v, err: %v", outReq.RequestURI, err)
+		ctx.errHandler.ServeHTTP(w, outReq, err)
+		return
+	}
+
+	response, err := f.roundTripper.RoundTrip(outReq)
 	if err != nil {
 		f.log.Errorf("vulcand/oxy/forward/httpbuffer: Error forwarding to %v, err: %v", req.URL, err)
 		ctx.errHandler.ServeHTTP(w, req, err)
@@ -247,19 +254,27 @@ func (f *httpForwarder) serveBufferedHTTP(w http.ResponseWriter, req *http.Reque
 
 // copyRequest makes a copy of the specified request to be sent using the configured
 // transport
-func (f *httpForwarder) copyRequest(req *http.Request, u *url.URL) *http.Request {
+func (f *httpForwarder) copyRequest(req *http.Request) (*http.Request, error) {
 	outReq := new(http.Request)
 	*outReq = *req // includes shallow copies of maps, but we handle this below
 
 	outReq.URL = utils.CopyURL(req.URL)
-	outReq.URL.Scheme = u.Scheme
-	outReq.URL.Host = u.Host
-	outReq.URL.Opaque = req.RequestURI
-	// raw query is already included in RequestURI, so ignore it to avoid dupes
-	outReq.URL.RawQuery = ""
+	outReq.URL.Scheme = req.URL.Scheme
+	outReq.URL.Host = req.URL.Host
+
+	// RequestURI contains the originally requested path and query string. We have to copy this to the outgoing request
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil {
+		return nil, err
+	}
+	outReq.URL.Path = u.Path
+	outReq.URL.RawPath = u.RawPath
+	outReq.URL.RawQuery = u.RawQuery
+	outReq.RequestURI = "" // Outgoing request should not have RequestURI
+
 	// Do not pass client Host header unless optsetter PassHostHeader is set.
 	if !f.passHost {
-		outReq.Host = u.Host
+		outReq.Host = req.URL.Host
 	}
 	outReq.Proto = "HTTP/1.1"
 	outReq.ProtoMajor = 1
@@ -274,7 +289,7 @@ func (f *httpForwarder) copyRequest(req *http.Request, u *url.URL) *http.Request
 	if f.rewriter != nil {
 		f.rewriter.Rewrite(outReq)
 	}
-	return outReq
+	return outReq, nil
 }
 
 // serveHTTP forwards websocket traffic
@@ -401,7 +416,12 @@ func (f *httpForwarder) serveStreamingHTTP(w http.ResponseWriter, inReq *http.Re
 		defer logEntry.Debug("vulcand/oxy/forward/httpstream: competed ServeHttp on request")
 	}
 
-	outReq := f.copyRequest(inReq, inReq.URL)
+	outReq, err := f.copyRequest(inReq)
+	if err != nil {
+		f.log.Errorf("vulcand/oxy/forward/httpstream: Error copying Request URI %v, err: %v", outReq.RequestURI, err)
+		ctx.errHandler.ServeHTTP(w, outReq, err)
+		return
+	}
 
 	pw := &utils.ProxyWriter{
 		W: w,
@@ -410,7 +430,7 @@ func (f *httpForwarder) serveStreamingHTTP(w http.ResponseWriter, inReq *http.Re
 
 	reqUrl, err := url.ParseRequestURI(outReq.RequestURI)
 	if err != nil {
-		f.log.Errorf("Error parsing Request URI %v, err: %v", outReq.RequestURI, err)
+		f.log.Errorf("vulcand/oxy/forward/httpstream: Error parsing Request URI %v, err: %v", outReq.RequestURI, err)
 		ctx.errHandler.ServeHTTP(w, outReq, err)
 		return
 	}
