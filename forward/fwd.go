@@ -160,8 +160,14 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (f *httpForwarder) serveHTTP(w http.ResponseWriter, req *http.Request, ctx *handlerContext) {
 	start := time.Now().UTC()
 
-	response, err := f.roundTripper.RoundTrip(f.copyRequest(req, req.URL))
+	outReq, err := f.copyRequest(req)
+	if err != nil {
+		ctx.log.Errorf("Error copying request %v, err: %v", req, err)
+		ctx.errHandler.ServeHTTP(w, req, err)
+		return
+	}
 
+	response, err := f.roundTripper.RoundTrip(outReq)
 	if err != nil {
 		ctx.log.Errorf("Error forwarding to %v, err: %v", req.URL, err)
 		ctx.errHandler.ServeHTTP(w, req, err)
@@ -224,19 +230,27 @@ func (f *httpForwarder) serveHTTP(w http.ResponseWriter, req *http.Request, ctx 
 
 // copyRequest makes a copy of the specified request to be sent using the configured
 // transport
-func (f *httpForwarder) copyRequest(req *http.Request, u *url.URL) *http.Request {
+func (f *httpForwarder) copyRequest(req *http.Request) (*http.Request, error) {
 	outReq := new(http.Request)
 	*outReq = *req // includes shallow copies of maps, but we handle this below
 
 	outReq.URL = utils.CopyURL(req.URL)
-	outReq.URL.Scheme = u.Scheme
-	outReq.URL.Host = u.Host
-	outReq.URL.Opaque = req.RequestURI
-	// raw query is already included in RequestURI, so ignore it to avoid dupes
-	outReq.URL.RawQuery = ""
+	outReq.URL.Scheme = req.URL.Scheme
+	outReq.URL.Host = req.URL.Host
+
+	// RequestURI contains the originally requested path and query string. We have to copy this to the outgoing request
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil {
+		return nil, err
+	}
+	outReq.URL.Path = u.Path
+	outReq.URL.RawPath = u.RawPath
+	outReq.URL.RawQuery = u.RawQuery
+	outReq.RequestURI = "" // Outgoing request should not have RequestURI
+
 	// Do not pass client Host header unless optsetter PassHostHeader is set.
 	if !f.passHost {
-		outReq.Host = u.Host
+		outReq.Host = req.URL.Host
 	}
 	outReq.Proto = "HTTP/1.1"
 	outReq.ProtoMajor = 1
@@ -257,7 +271,7 @@ func (f *httpForwarder) copyRequest(req *http.Request, u *url.URL) *http.Request
 		outReq.Body = nil
 	}
 
-	return outReq
+	return outReq, nil
 }
 
 // serveHTTP forwards websocket traffic
